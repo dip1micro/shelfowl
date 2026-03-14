@@ -20,10 +20,19 @@ SUPABASE_URL  = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY  = os.environ.get('SUPABASE_SERVICE_KEY', '')
 STORE_ID      = os.environ.get('STORE_ID', '')
 
-# ── HOG Person Detector (no PyTorch needed!) ───────────────────
-hog = cv2.HOGDescriptor()
-hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-print('[HOG] Person detector ready!')
+# ── YOLO Model ─────────────────────────────────────────────────
+model = None
+
+def load_model():
+    global model
+    if model is None:
+        try:
+            from ultralytics import YOLO
+            model = YOLO('yolov8n.pt')
+            print('[YOLO] yolov8n loaded!')
+        except Exception as e:
+            print(f'[YOLO] Failed: {e}')
+    return model
 
 # ── Risk Zones ─────────────────────────────────────────────────
 DEFAULT_ZONES = [
@@ -53,6 +62,8 @@ DEFAULT_ZONES = [
     },
 ]
 
+PERSON_CLASS_ID = 0
+
 # ── Helpers ────────────────────────────────────────────────────
 def frame_to_base64(frame):
     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -66,27 +77,15 @@ def is_in_zone(bbox, zone_coords):
     return zx1 <= cx <= zx2 and zy1 <= cy <= zy2
 
 def detect_persons(frame, confidence_threshold=0.4):
-    resized = cv2.resize(frame, (640, 480))
-    scale_x = frame.shape[1] / 640
-    scale_y = frame.shape[0] / 480
-    boxes, weights = hog.detectMultiScale(
-        resized,
-        winStride=(8, 8),
-        padding=(4, 4),
-        scale=1.05
-    )
+    yolo = load_model()
+    if yolo is None:
+        return []
+    results = yolo(frame, verbose=False)
     persons = []
-    if len(boxes) > 0:
-        for (x, y, w, h), weight in zip(boxes, weights):
-            if weight[0] >= confidence_threshold:
-                x1 = int(x * scale_x)
-                y1 = int(y * scale_y)
-                x2 = int((x + w) * scale_x)
-                y2 = int((y + h) * scale_y)
-                persons.append({
-                    'bbox': (x1, y1, x2, y2),
-                    'conf': round(float(weight[0]), 2)
-                })
+    for box in results[0].boxes:
+        if int(box.cls[0]) == PERSON_CLASS_ID and float(box.conf[0]) >= confidence_threshold:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            persons.append({'bbox': (x1, y1, x2, y2), 'conf': round(float(box.conf[0]), 2)})
     return persons
 
 def annotate_frame(frame, label, severity='high'):
@@ -120,9 +119,8 @@ def upload_snapshot(snapshot_b64, alert_id):
         )
         if resp.status_code in (200, 201):
             url = f'{SUPABASE_URL}/storage/v1/object/public/shelf-snapshots/{filename}'
-            print(f'[Supabase] Snapshot uploaded: {url}')
+            print(f'[Supabase] Snapshot: {url}')
             return url
-        print(f'[Supabase] Snapshot failed: {resp.status_code} {resp.text}')
         return None
     except Exception as e:
         print(f'[Supabase] Snapshot error: {e}')
@@ -130,7 +128,6 @@ def upload_snapshot(snapshot_b64, alert_id):
 
 def push_alert(alert, snapshot_b64=None):
     if not SUPABASE_KEY:
-        print('[Supabase] No key — skipping push')
         return False
     snapshot_url = upload_snapshot(snapshot_b64, alert['id'])
     payload = {
@@ -139,7 +136,7 @@ def push_alert(alert, snapshot_b64=None):
         'type':         alert['alert_type'].replace(' ', '_'),
         'message':      alert['message'],
         'zone_name':    alert.get('zone_name', ''),
-        'camera_name':  alert.get('camera_name', 'Video Upload'),
+        'camera_name':  'Video Upload',
         'confidence':   alert.get('confidence', 0),
         'duration_sec': alert.get('duration_sec', 0),
         'is_resolved':  False,
@@ -229,14 +226,11 @@ def analyze_video(video_path, settings):
                     if seconds_in_zone >= loiter_seconds and not zone_alert_fired.get(zid):
                         zone_alert_fired[zid] = True
 
-                        ann = annotate_frame(
-                            frame.copy(),
-                            f'{zone["type"].upper()} — {zone["name"]}',
-                            zone['severity']
-                        )
+                        ann = annotate_frame(frame.copy(),
+                            f'{zone["type"].upper()} — {zone["name"]}', zone['severity'])
                         px1, py1, px2, py2 = bbox
                         cv2.rectangle(ann, (px1, py1), (px2, py2), (0, 255, 0), 2)
-                        cv2.putText(ann, f'Person {conf:.1f}', (px1, py1 - 8),
+                        cv2.putText(ann, f'Person {conf:.0%}', (px1, py1 - 8),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                         snapshot_b64 = frame_to_base64(ann)
 
