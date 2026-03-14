@@ -20,22 +20,12 @@ SUPABASE_URL  = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY  = os.environ.get('SUPABASE_SERVICE_KEY', '')
 STORE_ID      = os.environ.get('STORE_ID', '')
 
-# ── YOLO Model ─────────────────────────────────────────────────
-model = None
-
-def load_model():
-    global model
-    if model is None:
-        try:
-            from ultralytics import YOLO
-            model = YOLO('yolov8n.pt')
-            print('[YOLO] Model loaded!')
-        except Exception as e:
-            print(f'[YOLO] Failed to load model: {e}')
-    return model
+# ── HOG Person Detector (no PyTorch needed!) ───────────────────
+hog = cv2.HOGDescriptor()
+hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+print('[HOG] Person detector ready!')
 
 # ── Risk Zones ─────────────────────────────────────────────────
-# Adjust coordinates to match your store camera layout
 DEFAULT_ZONES = [
     {
         'id'      : 1,
@@ -63,9 +53,6 @@ DEFAULT_ZONES = [
     },
 ]
 
-PERSON_CLASS_ID      = 0
-CONFIDENCE_THRESHOLD = 0.4
-
 # ── Helpers ────────────────────────────────────────────────────
 def frame_to_base64(frame):
     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -77,6 +64,30 @@ def is_in_zone(bbox, zone_coords):
     cx = (px1 + px2) // 2
     cy = (py1 + py2) // 2
     return zx1 <= cx <= zx2 and zy1 <= cy <= zy2
+
+def detect_persons(frame, confidence_threshold=0.4):
+    resized = cv2.resize(frame, (640, 480))
+    scale_x = frame.shape[1] / 640
+    scale_y = frame.shape[0] / 480
+    boxes, weights = hog.detectMultiScale(
+        resized,
+        winStride=(8, 8),
+        padding=(4, 4),
+        scale=1.05
+    )
+    persons = []
+    if len(boxes) > 0:
+        for (x, y, w, h), weight in zip(boxes, weights):
+            if weight[0] >= confidence_threshold:
+                x1 = int(x * scale_x)
+                y1 = int(y * scale_y)
+                x2 = int((x + w) * scale_x)
+                y2 = int((y + h) * scale_y)
+                persons.append({
+                    'bbox': (x1, y1, x2, y2),
+                    'conf': round(float(weight[0]), 2)
+                })
+    return persons
 
 def annotate_frame(frame, label, severity='high'):
     annotated = frame.copy()
@@ -121,13 +132,10 @@ def push_alert(alert, snapshot_b64=None):
     if not SUPABASE_KEY:
         print('[Supabase] No key — skipping push')
         return False
-
     snapshot_url = upload_snapshot(snapshot_b64, alert['id'])
-
-    severity_map = {'high': 'high', 'medium': 'medium', 'low': 'low'}
     payload = {
         'store_id':     STORE_ID,
-        'severity':     severity_map.get(alert['severity'], 'medium'),
+        'severity':     alert['severity'],
         'type':         alert['alert_type'].replace(' ', '_'),
         'message':      alert['message'],
         'zone_name':    alert.get('zone_name', ''),
@@ -159,10 +167,6 @@ def push_alert(alert, snapshot_b64=None):
 
 # ── Video Analysis ─────────────────────────────────────────────
 def analyze_video(video_path, settings):
-    yolo = load_model()
-    if yolo is None:
-        return {'error': 'YOLO model not loaded'}
-
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return {'error': 'Cannot open video'}
@@ -173,9 +177,9 @@ def analyze_video(video_path, settings):
     height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     duration     = total_frames / fps
 
-    loiter_seconds = float(settings.get('loiter_seconds', 3))
+    loiter_seconds       = float(settings.get('loiter_seconds', 3))
     confidence_threshold = float(settings.get('confidence_threshold', 0.4))
-    what_happened  = settings.get('what_happened', '').strip()
+    what_happened        = settings.get('what_happened', '').strip()
 
     # Scale zones to actual video resolution
     zones = []
@@ -189,13 +193,12 @@ def analyze_video(video_path, settings):
         )
         zones.append({**z, 'scaled_coords': scaled})
 
-    zone_entry_frame  = {}
-    zone_alert_fired  = {}
-    session_alerts    = []
-    frame_log         = []
-    frame_buffer      = []
-    frame_count       = 0
-    skip              = max(1, int(fps / 5))
+    zone_entry_frame = {}
+    zone_alert_fired = {}
+    session_alerts   = []
+    frame_log        = []
+    frame_count      = 0
+    skip             = max(1, int(fps / 5))
 
     while True:
         ret, frame = cap.read()
@@ -203,54 +206,37 @@ def analyze_video(video_path, settings):
             break
         frame_count += 1
 
-        frame_buffer.append(frame.copy())
-        if len(frame_buffer) > 30:
-            frame_buffer.pop(0)
-
         if frame_count % skip != 0:
             continue
 
         timestamp = round(frame_count / fps, 2)
-
-        # Run YOLO
-        results = yolo(frame, verbose=False)
-        persons = []
-        for box in results[0].boxes:
-            if int(box.cls[0]) == PERSON_CLASS_ID and float(box.conf[0]) >= confidence_threshold:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                persons.append({'bbox': (x1, y1, x2, y2), 'conf': float(box.conf[0])})
-
+        persons   = detect_persons(frame, confidence_threshold)
         active_zone_ids = set()
 
         for person in persons:
             bbox = person['bbox']
             conf = person['conf']
-
             for zone in zones:
                 zid = zone['id']
                 if is_in_zone(bbox, zone['scaled_coords']):
                     active_zone_ids.add(zid)
-
                     if zid not in zone_entry_frame:
                         zone_entry_frame[zid] = frame_count
                         zone_alert_fired[zid] = False
 
                     seconds_in_zone = (frame_count - zone_entry_frame[zid]) / fps
 
-                    # Fire alert if loitering threshold exceeded
                     if seconds_in_zone >= loiter_seconds and not zone_alert_fired.get(zid):
                         zone_alert_fired[zid] = True
 
-                        # Annotate frame
                         ann = annotate_frame(
                             frame.copy(),
                             f'{zone["type"].upper()} — {zone["name"]}',
                             zone['severity']
                         )
-                        # Draw person box
                         px1, py1, px2, py2 = bbox
                         cv2.rectangle(ann, (px1, py1), (px2, py2), (0, 255, 0), 2)
-                        cv2.putText(ann, f'Person {conf:.0%}', (px1, py1 - 8),
+                        cv2.putText(ann, f'Person {conf:.1f}', (px1, py1 - 8),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                         snapshot_b64 = frame_to_base64(ann)
 
@@ -260,7 +246,7 @@ def analyze_video(video_path, settings):
                             'severity':     zone['severity'],
                             'zone_name':    zone['name'],
                             'camera_name':  'Video Upload',
-                            'confidence':   round(conf, 2),
+                            'confidence':   conf,
                             'duration_sec': round(seconds_in_zone, 1),
                             'message':      f'{zone["name"]}: Person loitered {seconds_in_zone:.1f}s (threshold: {loiter_seconds}s)',
                             'timestamp':    datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -270,20 +256,17 @@ def analyze_video(video_path, settings):
                         session_alerts.append(alert)
                         push_alert(alert, snapshot_b64)
 
-        # Reset zones where no person detected
         for zid in list(zone_entry_frame.keys()):
             if zid not in active_zone_ids:
                 del zone_entry_frame[zid]
                 zone_alert_fired.pop(zid, None)
 
-        # Per-second log
         if frame_count % int(fps) == 0:
             thumb = cv2.resize(frame, (120, 68))
             frame_log.append({
-                'time':       f'{timestamp}s',
-                'persons':    len(persons),
-                'alerts':     len([a for a in session_alerts if a['video_time'] == f'{timestamp}s']),
-                'thumb_b64':  frame_to_base64(thumb),
+                'time':      f'{timestamp}s',
+                'persons':   len(persons),
+                'thumb_b64': frame_to_base64(thumb),
             })
 
     cap.release()
@@ -299,8 +282,8 @@ def analyze_video(video_path, settings):
             'frames':       len(frame_log),
         },
         'settings': {
-            'loiter_seconds':        loiter_seconds,
-            'confidence_threshold':  confidence_threshold,
+            'loiter_seconds':       loiter_seconds,
+            'confidence_threshold': confidence_threshold,
         },
         'what_happened': what_happened,
         'summary': {
@@ -318,7 +301,6 @@ def analyze_video(video_path, settings):
         all_sessions.pop()
 
     return result
-
 
 # ── Routes ─────────────────────────────────────────────────────
 @app.route('/')
@@ -353,11 +335,11 @@ def analyze():
 @app.route('/sessions')
 def get_sessions():
     return jsonify([{
-        'session_id':   s['session_id'],
-        'timestamp':    s['timestamp'],
-        'video':        s['video'],
-        'total_alerts': s['summary']['total_alerts'],
-        'what_happened':s['what_happened'],
+        'session_id':    s['session_id'],
+        'timestamp':     s['timestamp'],
+        'video':         s['video'],
+        'total_alerts':  s['summary']['total_alerts'],
+        'what_happened': s['what_happened'],
     } for s in all_sessions])
 
 @app.route('/health')
