@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShelfOwl.ai — Shelf Theft Detection</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0A0C10; color: #E8ECF4; font-family: 'IBM Plex Mono', monospace; min-height: 100vh; }
+header { background: #12151C; border-bottom: 1px solid #1E2330; padding: 1rem 2rem; display: flex; align-items: center; gap: 12px; }
+.logo { font-family: 'Syne', sans-serif; font-size: 20px; font-weight: 700; }
+.logo span { color: #00E5A0; }
+.badge { font-size: 9px; padding: 3px 8px; border-radius: 8px; background: #001a2c; border: 1px solid #0066FF; color: #0066FF; }
+.container { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+.card { background: #12151C; border: 1px solid #1E2330; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+.card h2 { font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 500; margin-bottom: 1.25rem; color: #E8ECF4; }
+.field { margin-bottom: 1rem; }
+.field label { display: block; font-size: 10px; color: #5A6278; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+.field input, .field textarea, .field select {
+  width: 100%; background: #0A0C10; border: 1px solid #1E2330; border-radius: 8px;
+  padding: 10px 12px; color: #E8ECF4; font-family: 'IBM Plex Mono', monospace; font-size: 13px; outline: none;
+}
+.field input:focus, .field textarea:focus { border-color: #00E5A0; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.upload-zone {
+  border: 2px dashed #1E2330; border-radius: 10px; padding: 2rem; text-align: center;
+  cursor: pointer; transition: border-color 0.2s; margin-bottom: 1rem;
+}
+.upload-zone:hover, .upload-zone.drag { border-color: #00E5A0; }
+.upload-zone p { font-size: 12px; color: #5A6278; margin-top: 8px; }
+.upload-zone .icon { font-size: 32px; margin-bottom: 8px; }
+.btn {
+  width: 100%; padding: 12px; background: #00E5A0; color: #000; border: none;
+  border-radius: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 13px;
+  font-weight: 500; cursor: pointer; transition: opacity 0.2s; letter-spacing: 0.5px;
+}
+.btn:hover { opacity: 0.88; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.5rem; }
+.stat { background: #12151C; border: 1px solid #1E2330; border-radius: 10px; padding: 1rem; text-align: center; }
+.stat .val { font-family: 'Syne', sans-serif; font-size: 28px; font-weight: 700; }
+.stat .lbl { font-size: 9px; color: #5A6278; letter-spacing: 1px; text-transform: uppercase; margin-top: 4px; }
+.alert-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid #1E2330; cursor: pointer; }
+.alert-item:hover { background: #0d1117; }
+.alert-item:last-child { border-bottom: none; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+.alert-msg { font-size: 11px; color: #E8ECF4; line-height: 1.4; }
+.alert-meta { font-size: 10px; color: #5A6278; margin-top: 3px; }
+.snap { width: 100%; border-radius: 8px; margin-top: 10px; display: none; }
+.progress { background: #1E2330; border-radius: 4px; height: 4px; margin: 1rem 0; overflow: hidden; display: none; }
+.progress-bar { height: 100%; background: #00E5A0; width: 0%; transition: width 0.3s; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.status { font-size: 11px; color: #5A6278; text-align: center; margin-bottom: 1rem; display: none; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Shelf<span>Owl</span>.ai</div>
+  <div class="badge">SHELF THEFT DETECTION</div>
+</header>
+
+<div class="container">
+  <!-- Upload Card -->
+  <div class="card">
+    <h2>Upload Video to Analyze</h2>
+    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('videoInput').click()">
+      <div class="icon">📹</div>
+      <div id="uploadLabel" style="font-size:13px;color:#E8ECF4;">Select video file</div>
+      <p>MP4 · MOV · AVI — store camera footage</p>
+    </div>
+    <input type="file" id="videoInput" accept="video/*" style="display:none" onchange="fileSelected(this)">
+
+    <div class="row">
+      <div class="field">
+        <label>Loiter Threshold (seconds)</label>
+        <input type="number" id="loiterSec" value="3" min="1" max="30">
+      </div>
+      <div class="field">
+        <label>Confidence Threshold</label>
+        <input type="number" id="confThreshold" value="0.4" min="0.1" max="1.0" step="0.05">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>What actually happened? (optional)</label>
+      <textarea id="whatHappened" rows="2" placeholder="e.g. Person loitered near shelf 3 for 8 seconds then left without purchasing"></textarea>
+    </div>
+
+    <div class="progress" id="progress"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="status" id="status">Analyzing video with YOLOv8...</div>
+    <button class="btn" id="analyzeBtn" onclick="analyzeVideo()" disabled>Select a video first</button>
+  </div>
+
+  <!-- Results -->
+  <div id="results" class="hidden">
+    <div class="stats">
+      <div class="stat"><div class="val" id="statHigh" style="color:#FF4444">0</div><div class="lbl">High alerts</div></div>
+      <div class="stat"><div class="val" id="statMed" style="color:#FFAA00">0</div><div class="lbl">Medium</div></div>
+      <div class="stat"><div class="val" id="statLow" style="color:#00E5A0">0</div><div class="lbl">Low</div></div>
+      <div class="stat"><div class="val" id="statDur" style="color:#E8ECF4">0s</div><div class="lbl">Duration</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Detection Alerts</h2>
+      <div id="alertList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let selectedFile = null;
+const sevColor = { high: '#FF4444', medium: '#FFAA00', low: '#00E5A0' };
+
+function fileSelected(input) {
+  if (input.files[0]) {
+    selectedFile = input.files[0];
+    document.getElementById('uploadLabel').textContent = selectedFile.name;
+    document.getElementById('analyzeBtn').disabled = false;
+    document.getElementById('analyzeBtn').textContent = 'Analyze Video →';
+  }
+}
+
+async function analyzeVideo() {
+  if (!selectedFile) return;
+
+  const btn = document.getElementById('analyzeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Analyzing...';
+  document.getElementById('progress').style.display = 'block';
+  document.getElementById('status').style.display = 'block';
+  document.getElementById('progressBar').style.width = '30%';
+  document.getElementById('results').classList.add('hidden');
+
+  const form = new FormData();
+  form.append('video', selectedFile);
+  form.append('loiter_seconds', document.getElementById('loiterSec').value);
+  form.append('confidence_threshold', document.getElementById('confThreshold').value);
+  form.append('what_happened', document.getElementById('whatHappened').value);
+
+  try {
+    document.getElementById('progressBar').style.width = '60%';
+    const resp = await fetch('/analyze', { method: 'POST', body: form });
+    const data = await resp.json();
+    document.getElementById('progressBar').style.width = '100%';
+
+    if (data.error) {
+      alert('Error: ' + data.error);
+    } else {
+      showResults(data);
+    }
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Analyze Video →';
+    document.getElementById('progress').style.display = 'none';
+    document.getElementById('status').style.display = 'none';
+  }
+}
+
+function showResults(data) {
+  document.getElementById('statHigh').textContent = data.summary.high;
+  document.getElementById('statMed').textContent  = data.summary.medium;
+  document.getElementById('statLow').textContent  = data.summary.low;
+  document.getElementById('statDur').textContent  = data.video_info.duration_sec + 's';
+
+  const list = document.getElementById('alertList');
+  list.innerHTML = '';
+
+  if (!data.alerts.length) {
+    list.innerHTML = '<div style="font-size:12px;color:#5A6278;padding:1rem 0">No alerts detected — all clear ✓</div>';
+  } else {
+    data.alerts.forEach(a => {
+      const div = document.createElement('div');
+      div.className = 'alert-item';
+      div.innerHTML = `
+        <div class="dot" style="background:${sevColor[a.severity]}"></div>
+        <div style="flex:1">
+          <div class="alert-msg">${a.message}</div>
+          <div class="alert-meta">${a.zone_name} · ${a.video_time} · confidence ${Math.round(a.confidence*100)}%</div>
+          ${a.snapshot_b64 ? `<img class="snap" id="snap_${a.id}" src="data:image/jpeg;base64,${a.snapshot_b64}">` : ''}
+        </div>
+        <div style="font-size:9px;padding:2px 7px;border-radius:6px;background:#1a0000;color:${sevColor[a.severity]};align-self:flex-start;flex-shrink:0">${a.severity}</div>
+      `;
+      if (a.snapshot_b64) {
+        div.onclick = () => {
+          const img = document.getElementById('snap_' + a.id);
+          img.style.display = img.style.display === 'block' ? 'none' : 'block';
+        };
+      }
+      list.appendChild(div);
+    });
+  }
+
+  document.getElementById('results').classList.remove('hidden');
+}
+
+// Drag and drop
+const zone = document.getElementById('uploadZone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('video/')) {
+    selectedFile = file;
+    document.getElementById('uploadLabel').textContent = file.name;
+    document.getElementById('analyzeBtn').disabled = false;
+    document.getElementById('analyzeBtn').textContent = 'Analyze Video →';
+  }
+});
+</script>
+</body>
+</html>
