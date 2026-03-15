@@ -195,7 +195,7 @@ def analyze_video(video_path, settings):
     session_alerts   = []
     frame_log        = []
     frame_count      = 0
-    skip             = max(1, int(fps / 5))
+    skip             = max(1, int(fps * 2))
 
     while True:
         ret, frame = cap.read()
