@@ -14,4 +14,6 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 300
+###CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 300
+
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 300"]
